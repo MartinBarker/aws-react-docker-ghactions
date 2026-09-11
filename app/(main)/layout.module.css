@@ -76,16 +76,26 @@
   box-sizing: border-box;
   white-space: nowrap;
   overflow: hidden;
+  /* A size container, so the name inside can scale to the width it actually
+     has (1cqi = 1% of this box's content width). */
+  container-type: inline-size;
 }
 
 .sidebarHeaderText {
-  font-size: 22px;
+  /* Scales to fit rather than truncating to "Martin Bar...". The content box
+     is 160px (250px sidebar minus 70px + 20px padding), and 152px once the
+     thin scrollbar appears; at a fixed 22px the name is 155px wide in Poppins
+     Bold, so the scrollbar alone tipped it into the ellipsis. At 12.5cqi the
+     name fits even the widest bold fallback measured (DejaVu Sans, 7.78x the
+     font size, if Poppins fails to load) with ~3% to spare; clamp() holds it
+     between a legible floor and the original 22px. */
+  font-size: clamp(12px, 12.5cqi, 22px);
   margin: 0;
   font-weight: bold;
   transition: opacity 0.2s ease;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
+  text-overflow: clip;
 }
 
 .sidebarCollapse {
@@ -513,10 +523,9 @@
     padding: 4px 0;
   }
   
-  /* Smaller text for mobile to prevent cutoff */
+  /* Smaller cap on mobile, with the same fit-to-width scaling as desktop. */
   .sidebarHeaderText {
-    font-size: 16px; /* Smaller font size for mobile */
-    padding-right: 10px; /* Add some padding to prevent cutoff */
+    font-size: clamp(12px, 12.5cqi, 16px);
   }
   
   /* Make all sidebar menu text smaller on mobile */
