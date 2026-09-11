@@ -11,10 +11,10 @@ import { ColorContext } from "../ColorContext";
 import {
   extractTagsFromDiscogs,
   buildTagString,
-  sanitizeYouTubeTag,
   buildSafeTagList,
   buildSafeTagString,
   youTubeTagCost,
+  measureYouTubeTags,
   generateVideoTitleRecommendations,
   buildTimestampDescription,
   formatTimestamp,
@@ -902,6 +902,8 @@ export default function RipTagPage() {
 
   // Video timeline / ordering (Step 5)
   const [slideshowMode, setSlideshowMode] = useState("distribute"); // "distribute" | "loop" | "per-track" | "manual"
+  // Set when an image drop finishes; see the effect that resets "Sync with tracks".
+  const imageDropCheckRef = useRef(false);
   const [loopInterval, setLoopInterval] = useState(10); // seconds per image when mode is "loop"
   const [motionFps, setMotionFps] = useState(24); // output fps when any image has a motion effect
   const [manualImageTimings, setManualImageTimings] = useState({}); // {imgId: {startTime, endTime}}
@@ -1015,6 +1017,9 @@ export default function RipTagPage() {
     setExportedTracks([]); setSelectedTracks(new Set()); setMessage("");
     setVideoImages([]); setSelectedVideoImages(new Set()); setSelectedVideoAudios(new Set()); setRenderedVideoSrc(null);
     setTrackImageAssign({}); setTrackTextOverrides({});
+    // Without this a new project inherited "Sync with tracks" from the last one
+    // (Auto-assign, a pin, or a batch render all switch to it).
+    setSlideshowMode("distribute");
     setTextOverlay(loadSavedTextDefaults() || DEFAULT_TEXT_OVERLAY);
     batchVideos.forEach(v => { try { URL.revokeObjectURL(v.url); } catch {} });
     setBatchVideos([]);
@@ -1625,6 +1630,25 @@ export default function RipTagPage() {
       });
     }
   }, [step, exportedTracks]);
+
+  // Dropping several images onto a project with at most one audio track should
+  // never land on "Sync with tracks": that mode gives each track one image, so a
+  // single track would show only the first image and silently ignore the rest.
+  // The mode can be left over from an earlier Auto-assign, pin or batch render,
+  // so a drop resets it to the default. Evaluated once both loaders are done —
+  // a mixed drop awaits its audio before its images — and only after a drop, so
+  // choosing "Sync with tracks" by hand afterwards is left alone.
+  useEffect(() => {
+    if (!imageDropCheckRef.current) return;
+    if (imageLoadingStatus || audioLoadingStatus) return;
+    imageDropCheckRef.current = false;
+    const renderTrackCount = step === 5
+      ? [...selectedVideoAudios].filter(i => i >= 0 && i < exportedTracks.length).length
+      : exportedTracks.length;
+    if (slideshowMode === "per-track" && renderTrackCount <= 1 && selectedVideoImages.size > 1) {
+      setSlideshowMode("distribute");
+    }
+  }, [imageLoadingStatus, audioLoadingStatus, step, selectedVideoAudios, exportedTracks.length, selectedVideoImages, slideshowMode]);
 
   // ---- Computed ----
   const trackCount = tracks.length;
@@ -3218,6 +3242,7 @@ export default function RipTagPage() {
         ? { ...img, thumbUrl, previewUrl, width, height, naturalWidth: width, naturalHeight: height, loading: false }
         : img));
     }
+    imageDropCheckRef.current = true;
     setImageLoadingStatus(null);
   };
 
@@ -5374,6 +5399,9 @@ export default function RipTagPage() {
   };
 
   const batchPlan = buildBatchPlan();
+  // A batch makes one video per track, so a plan of one is just a single render.
+  const batchTooSmall = batchPlan.length < 2;
+  const batchAudioCount = getOrderedAudios().length;
 
   const batchOutputName = (item, total) => {
     const num = String(item.orderIdx + 1).padStart(String(total).length, "0");
@@ -5484,6 +5512,7 @@ export default function RipTagPage() {
     if (!id) { setMessage("No active project to render into — reload the page if this persists."); return; }
     const plan = buildBatchPlan();
     if (!plan.length) { setMessage("Nothing to batch render — select at least one audio track and one image."); return; }
+    if (plan.length < 2) { setMessage("Render Batch makes one video per track, so it needs at least two. For a single track, use Render Concat."); return; }
     setShowVideoLogs(true);
     // Drop the previous run's finished/cancelled rows so the progress list shows
     // this batch only — a smaller plan would otherwise leave orphans behind.
@@ -8724,16 +8753,22 @@ export default function RipTagPage() {
                     type="button"
                     className={styles.batchBtn}
                     onClick={startBatchRender}
-                    disabled={batchPlan.length === 0 || batchInFlight.length > 0}
+                    disabled={batchTooSmall || batchInFlight.length > 0}
                     title={batchPlan.length === 0
                       ? "Select audio tracks and at least one image first"
-                      : `Queue one video per track (${batchPlan.length})`}
+                      : batchTooSmall
+                        ? (batchAudioCount <= 1
+                          ? "Only one audio track is selected. A batch makes one video per track — use Render Concat for a single track."
+                          : "Only one track has a pinned image. Pin images to more tracks, or set the batch to cover every selected track.")
+                        : `Queue one video per track (${batchPlan.length})`}
                   >
                     {batchInFlight.length > 0
                       ? `Rendering Batch — ${activeBatchJobs.filter(j => j.status === "done").length}/${activeBatchJobs.length} done`
                       : batchPlan.length === 0
                         ? "Render Batch — nothing to render"
-                        : `Render Batch (${batchPlan.length} video${batchPlan.length === 1 ? "" : "s"}, ${batchPlan.length} track${batchPlan.length === 1 ? "" : "s"})`}
+                        : batchTooSmall
+                          ? "Render Batch — needs 2+ tracks"
+                          : `Render Batch (${batchPlan.length} video${batchPlan.length === 1 ? "" : "s"}, ${batchPlan.length} track${batchPlan.length === 1 ? "" : "s"})`}
                   </button>
                   <span className={styles.renderModeHint}>Separate videos — one per track, each with its own image.</span>
                 </div>
@@ -9138,16 +9173,14 @@ export default function RipTagPage() {
                   {ytAuthState.canAuth && (() => {
                     const titleLen = ytUploadData.title.length;
                     const descLen = ytUploadData.description.length;
-                    // Counted the way YouTube counts, not by raw string length:
-                    // a multi-word keyword is stored quoted and those two quotes
-                    // count, so a 500-character tag string is really over budget.
-                    // Measuring the text was why uploads failed with "invalid
-                    // video keywords" while the counter still read green.
-                    const tagsLen = (ytUploadData.tags || "")
-                      .split(",")
-                      .map(t => sanitizeYouTubeTag(t))
-                      .filter(Boolean)
-                      .reduce((sum, t) => sum + youTubeTagCost(t), 0);
+                    // The larger of the two measures that can bust the limit:
+                    // YouTube's quote-aware keyword budget (a multi-word keyword
+                    // is stored quoted and those two quotes count), and the plain
+                    // length of the ", "-joined field text. Counting only the
+                    // former let 71 short single-word tags read 497/500 while the
+                    // field held 637 characters; counting only the latter was why
+                    // uploads failed with "invalid video keywords" on green.
+                    const tagsLen = measureYouTubeTags(ytUploadData.tags).length;
                     const titleOver = titleLen > YT_LIMITS.title;
                     const descOver = descLen > YT_LIMITS.description;
                     const tagsOver = tagsLen > YT_LIMITS.tags;
@@ -9236,8 +9269,10 @@ export default function RipTagPage() {
                           <span>Tags</span>
                           <span
                             className={`${styles.ytCharCount} ${tagsOver ? styles.ytCharOver : ""}`}
-                            title={"YouTube's keyword budget. A tag with a space in it counts two extra characters "
-                              + "for the quotes YouTube stores it with. Anything over the limit is dropped whole at "
+                            title={"The larger of two counts: YouTube's keyword budget (a tag with a space in it "
+                              + "costs two extra characters for the quotes YouTube stores it with) and the length of "
+                              + "this field's text, commas and spaces included. Generated tags stop at "
+                              + `${YT_LIMITS.tagsSafe} to leave headroom. Anything over the limit is dropped whole at `
                               + "upload time — never cut mid-word."}
                           >{tagsLen}/{YT_LIMITS.tags}</span>
                         </div>
