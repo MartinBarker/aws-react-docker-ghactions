@@ -167,23 +167,49 @@ export function buildSafeTagList(input) {
   const raw = Array.isArray(input) ? input : String(input ?? '').split(',');
   const seen = new Set();
   const out = [];
-  let total = 0;
+  let cost = 0;      // YouTube's quote-aware keyword budget
+  let fieldLen = 0;  // the literal ', '-joined text the tags field holds
   for (const item of raw) {
     const tag = sanitizeYouTubeTag(item);
     if (!tag) continue;
     const key = tag.toLowerCase();
     if (seen.has(key)) continue;
-    const cost = youTubeTagCost(tag);
-    if (total + cost > YT_LIMITS.tags) continue;
+    // Both measures are checked, because neither bounds the other. The quote
+    // accounting ignores the ', ' separators, so 71 seven-character single-word
+    // tags measured 497/500 while the field itself held 637 characters. The
+    // separator accounting in turn ignores the quotes YouTube adds. A tag is
+    // only kept when it fits BOTH, against the safety target rather than the
+    // hard 500.
+    const nextCost = cost + youTubeTagCost(tag);
+    const nextFieldLen = fieldLen + (out.length ? 2 : 0) + tag.length;
+    if (nextCost > YT_LIMITS.tagsSafe || nextFieldLen > YT_LIMITS.tagsSafe) continue;
     seen.add(key);
     out.push(tag);
-    total += cost;
+    cost = nextCost;
+    fieldLen = nextFieldLen;
   }
   return out;
 }
 
 export function buildSafeTagString(input) {
   return buildSafeTagList(input).join(', ');
+}
+
+/**
+ * Measure a tag list the two ways that matter, from the sanitized tags that
+ * would actually be sent:
+ *   cost        - YouTube's keyword budget (multi-word tags cost 2 extra for quotes)
+ *   fieldLength - the literal ', '-joined string, commas and spaces included
+ * `length` is the larger of the two, so a counter built on it can never
+ * under-report which limit is about to be hit.
+ */
+export function measureYouTubeTags(input) {
+  const tags = (Array.isArray(input) ? input : String(input ?? '').split(','))
+    .map(t => sanitizeYouTubeTag(t))
+    .filter(Boolean);
+  const cost = tags.reduce((sum, t) => sum + youTubeTagCost(t), 0);
+  const fieldLength = tags.join(', ').length;
+  return { tags, cost, fieldLength, length: Math.max(cost, fieldLength) };
 }
 
 /**
@@ -325,6 +351,10 @@ export const YT_LIMITS = {
   title: 100,
   description: 5000,
   tags: 500,
+  // What the builders actually target. YouTube's hard ceiling is 500 by both
+  // measures; generated tags stop short of it so a user editing the field by
+  // hand has room to add a keyword without going over.
+  tagsSafe: 455,
   tagSingle: 30,
   hashtags: 15,
 };
